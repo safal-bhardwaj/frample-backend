@@ -1,0 +1,38 @@
+spring.application.name=frample-backend
+
+
+#db configs-----
+
+spring.datasource.url=jdbc:mysql://localhost:3306/frample_db
+spring.datasource.username=your_db_username
+spring.datasource.password=your_db_password
+spring.datasource.driver-class-name=com.mysql.cj.jdbc.Driver
+
+# Schema generation strategy
+spring.jpa.hibernate.ddl-auto=update
+
+# SQL Logging (Correct Spring Boot properties)
+spring.jpa.show-sql=true
+spring.jpa.properties.hibernate.format_sql=true
+
+# Optional: Turn off the open-in-view warning from your log
+spring.jpa.open-in-view=false
+
+
+# Security & JWT Properties
+security.jwt.secret=replace_with_a_64_character_random_string
+security.jwt.issuer=frample-backend
+security.jwt.access-ttl-seconds=3600
+security.jwt.refresh-ttl-seconds=604800
+
+#Cookies
+security.cookie.secure=false
+
+#Oauth Google
+security.oauth.google.client-id=replace_with_your_google_oauth_client_id
+
+#Storage
+security.r2.endpoint=https://your-account-id.r2.cloudflarestorage.com
+security.r2.bucket=your-bucket-name
+security.r2.access-key=replace_with_your_r2_access_key
+security.r2.secret-key=replace_with_your_r2_secret_key
