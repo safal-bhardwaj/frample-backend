@@ -5,30 +5,39 @@ import java.util.UUID;
 
 import org.modelmapper.ModelMapper;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
 
+import frample.com.frample_backend.dtos.MediaUrlResponse;
 import frample.com.frample_backend.dtos.PresignedUploadRequest;
 import frample.com.frample_backend.dtos.PresignedUploadResponse;
 import frample.com.frample_backend.dtos.SampleDto;
+import frample.com.frample_backend.dtos.SampleFilter;
 import frample.com.frample_backend.dtos.SaveSampleRequest;
+import frample.com.frample_backend.dtos.UpdateSampleRequest;
 import frample.com.frample_backend.entities.Sample;
 import frample.com.frample_backend.entities.User;
+import frample.com.frample_backend.exceptions.ForbiddenOperationException;
+import frample.com.frample_backend.exceptions.ResourceNotFoundException;
 import frample.com.frample_backend.repositories.SampleRepository;
+import frample.com.frample_backend.repositories.SampleSpecifications;
 import frample.com.frample_backend.services.SampleService;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.model.DeleteObjectRequest;
+import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 import software.amazon.awssdk.services.s3.presigner.S3Presigner;
-import software.amazon.awssdk.services.s3.presigner.model.PresignedPutObjectRequest;
-import software.amazon.awssdk.services.s3.presigner.model.PutObjectPresignRequest;
-import org.springframework.data.domain.Pageable;
-import org.springframework.data.domain.Page;
-import frample.com.frample_backend.dtos.MediaUrlResponse;
-import frample.com.frample_backend.exceptions.ResourceNotFoundException;
-import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 import software.amazon.awssdk.services.s3.presigner.model.GetObjectPresignRequest;
 import software.amazon.awssdk.services.s3.presigner.model.PresignedGetObjectRequest;
+import software.amazon.awssdk.services.s3.presigner.model.PresignedPutObjectRequest;
+import software.amazon.awssdk.services.s3.presigner.model.PutObjectPresignRequest;
 
-
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class SampleServiceImpl implements SampleService {
@@ -36,6 +45,7 @@ public class SampleServiceImpl implements SampleService {
     private final SampleRepository sampleRepository;
     private final S3Presigner s3Presigner;
     private final ModelMapper modelMapper;
+    private final S3Client s3Client;
 
     @Value("${security.r2.bucket}")
     private String bucket;
@@ -95,10 +105,14 @@ public class SampleServiceImpl implements SampleService {
     }
     
     @Override
-    public Page<SampleDto> getAllSamples(Pageable pageable) {
-        return sampleRepository.findAllByOrderByCreatedDttmDesc(pageable).map(this::toDto);
+    public Page<SampleDto> getSamples(SampleFilter filter, int page, int size) {
+        Pageable pageable = PageRequest.of(
+                Math.max(page, 0),
+                Math.min(Math.max(size, 1), 50),   // cap page size so nobody can request 100,000 rows
+                Sort.by(Sort.Direction.DESC, "createdDttm"));
+
+        return sampleRepository.findAll(SampleSpecifications.withFilters(filter), pageable).map(this::toDto);
     }
-    
     @Override
     public MediaUrlResponse getStreamUrl(Long sampleId) {
         Sample sample = sampleRepository.findById(sampleId)
@@ -162,5 +176,58 @@ public class SampleServiceImpl implements SampleService {
         String extension = dot >= 0 ? original.substring(dot) : "";
 
         return sanitize(name.toString()) + sanitize(extension);
+    }
+    
+    @Override
+    public Page<SampleDto> getMySamples(Long userId, int page, int size) {
+        Pageable pageable = PageRequest.of(
+                Math.max(page, 0),
+                Math.min(Math.max(size, 1), 50),
+                Sort.by(Sort.Direction.DESC, "createdDttm"));
+        return sampleRepository.findByUploader_UserId(userId, pageable).map(this::toDto);
+    }
+
+    @Override
+    public SampleDto updateSample(Long sampleId, UpdateSampleRequest request, User currentUser) {
+        Sample sample = getOwnedSample(sampleId, currentUser);
+
+        sample.setTitle(request.title().trim());
+        sample.setDescription(blankToNull(request.description()));
+        sample.setBpm(request.bpm());
+        sample.setSampleType(request.sampleType());
+        sample.setMusicalKey(blankToNull(request.musicalKey()));
+        sample.setScale(request.scale());
+        sample.setTimeSignature(blankToNull(request.timeSignature()));
+        sample.setGenre(blankToNull(request.genre()));
+
+        return toDto(sampleRepository.save(sample));
+    }
+
+    @Override
+    public void deleteSample(Long sampleId, User currentUser) {
+        Sample sample = getOwnedSample(sampleId, currentUser);
+        String fileKey = sample.getFileKey();
+
+        // Database first: an orphaned file is harmless, a row pointing at a missing file is not
+        sampleRepository.deleteById(sampleId);
+
+        try {
+            s3Client.deleteObject(DeleteObjectRequest.builder().bucket(bucket).key(fileKey).build());
+        } catch (Exception e) {
+            log.warn("Sample {} deleted but R2 object {} could not be removed: {}", sampleId, fileKey, e.getMessage());
+        }
+    }
+
+    private Sample getOwnedSample(Long sampleId, User currentUser) {
+        Sample sample = sampleRepository.findBySampleId(sampleId)
+                .orElseThrow(() -> new ResourceNotFoundException("Sample not found"));
+        if (!sample.getUploader().getUserId().equals(currentUser.getUserId())) {
+            throw new ForbiddenOperationException("You can only modify your own samples");
+        }
+        return sample;
+    }
+
+    private String blankToNull(String s) {
+        return (s == null || s.isBlank()) ? null : s.trim();
     }
 }
