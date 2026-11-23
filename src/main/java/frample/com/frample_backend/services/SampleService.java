@@ -12,7 +12,7 @@ import frample.com.frample_backend.dtos.UpdateSampleRequest;
 import frample.com.frample_backend.entities.User;
 
 public interface SampleService {
-    PresignedUploadResponse createPresignedUpload(PresignedUploadRequest request);
+    PresignedUploadResponse createPresignedUpload(PresignedUploadRequest request, User uploader);
     SampleDto saveSample(SaveSampleRequest request, User uploader);
     Page<SampleDto> getSamples(SampleFilter filter, int page, int size);
     MediaUrlResponse getStreamUrl(Long sampleId);

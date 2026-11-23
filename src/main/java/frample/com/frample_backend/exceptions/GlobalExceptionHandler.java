@@ -40,4 +40,8 @@ public class GlobalExceptionHandler
 	            .orElse("Invalid request");
 	    return ResponseEntity.badRequest().body(Map.of("message", message, "statusCode", "400"));
 	}
+	@ExceptionHandler(BadRequestException.class)
+	public ResponseEntity<Map<String, String>> handleBadRequest(BadRequestException ex) {
+	    return ResponseEntity.badRequest().body(Map.of("message", ex.getMessage(), "statusCode", "400"));
+	}
 }

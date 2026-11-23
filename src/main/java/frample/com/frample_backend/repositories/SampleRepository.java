@@ -13,6 +13,7 @@ import frample.com.frample_backend.entities.Sample;
 
 public interface SampleRepository extends JpaRepository<Sample, Long>, JpaSpecificationExecutor<Sample> {
 
+	long countByUploader_UserId(Long userId);
     @Override
     @EntityGraph(attributePaths = "uploader")
     Page<Sample> findAll(Specification<Sample> spec, Pageable pageable);

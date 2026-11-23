@@ -20,6 +20,7 @@ import frample.com.frample_backend.dtos.SaveSampleRequest;
 import frample.com.frample_backend.dtos.UpdateSampleRequest;
 import frample.com.frample_backend.entities.Sample;
 import frample.com.frample_backend.entities.User;
+import frample.com.frample_backend.exceptions.BadRequestException;
 import frample.com.frample_backend.exceptions.ForbiddenOperationException;
 import frample.com.frample_backend.exceptions.ResourceNotFoundException;
 import frample.com.frample_backend.repositories.SampleRepository;
@@ -30,7 +31,10 @@ import lombok.extern.slf4j.Slf4j;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.DeleteObjectRequest;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
+import software.amazon.awssdk.services.s3.model.HeadObjectRequest;
+import software.amazon.awssdk.services.s3.model.HeadObjectResponse;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
+import software.amazon.awssdk.services.s3.model.S3Exception;
 import software.amazon.awssdk.services.s3.presigner.S3Presigner;
 import software.amazon.awssdk.services.s3.presigner.model.GetObjectPresignRequest;
 import software.amazon.awssdk.services.s3.presigner.model.PresignedGetObjectRequest;
@@ -46,18 +50,36 @@ public class SampleServiceImpl implements SampleService {
     private final S3Presigner s3Presigner;
     private final ModelMapper modelMapper;
     private final S3Client s3Client;
+    @Value("${app.upload.max-bytes}")
+    private long maxUploadBytes;
+
+    @Value("${app.upload.max-samples-per-user}")
+    private int maxSamplesPerUser;
 
     @Value("${security.r2.bucket}")
     private String bucket;
 
     @Override
-    public PresignedUploadResponse createPresignedUpload(PresignedUploadRequest request) {
-        String fileKey = "samples/" + UUID.randomUUID() + "-" + sanitize(request.fileName());
+    public PresignedUploadResponse createPresignedUpload(PresignedUploadRequest request, User uploader) {
+        if (request.fileName() == null || request.fileName().isBlank()) {
+            throw new BadRequestException("File name is required");
+        }
+        if (request.contentType() == null || !request.contentType().startsWith("audio/")) {
+            throw new BadRequestException("Only audio files are allowed");
+        }
+        if (request.fileSizeBytes() == null || request.fileSizeBytes() <= 0 || request.fileSizeBytes() > maxUploadBytes) {
+            throw new BadRequestException("File must be between 1 byte and " + (maxUploadBytes / 1024 / 1024) + " MB");
+        }
+        enforceUploadQuota(uploader);
+
+        // The user id in the key means a file can only be registered by the person it was issued to
+        String fileKey = "samples/" + uploader.getUserId() + "/" + UUID.randomUUID() + "-" + sanitize(request.fileName());
 
         PutObjectRequest putRequest = PutObjectRequest.builder()
                 .bucket(bucket)
                 .key(fileKey)
                 .contentType(request.contentType())
+                .contentLength(request.fileSizeBytes())   // signed into the URL: R2 rejects a different size
                 .build();
 
         PutObjectPresignRequest presignRequest = PutObjectPresignRequest.builder()
@@ -65,15 +87,36 @@ public class SampleServiceImpl implements SampleService {
                 .putObjectRequest(putRequest)
                 .build();
 
-        PresignedPutObjectRequest presigned = s3Presigner.presignPutObject(presignRequest);
-
-        return new PresignedUploadResponse(presigned.url().toString(), fileKey);
+        return new PresignedUploadResponse(s3Presigner.presignPutObject(presignRequest).url().toString(), fileKey);
     }
 
     @Override
     public SampleDto saveSample(SaveSampleRequest request, User uploader) {
+        if (!request.fileKey().startsWith("samples/" + uploader.getUserId() + "/")) {
+            throw new BadRequestException("Invalid file key");
+        }
+        enforceUploadQuota(uploader);
+
+        // Trust R2, not the browser: inspect the file that was actually uploaded
+        HeadObjectResponse head;
+        try {
+            head = s3Client.headObject(HeadObjectRequest.builder().bucket(bucket).key(request.fileKey()).build());
+        } catch (S3Exception e) {
+            if (e.statusCode() == 404) {
+                throw new BadRequestException("Uploaded file not found. Please upload again.");
+            }
+            throw e;
+        }
+
+        String contentType = head.contentType();
+        long size = head.contentLength();
+        if (contentType == null || !contentType.startsWith("audio/") || size <= 0 || size > maxUploadBytes) {
+            deleteObjectQuietly(request.fileKey());
+            throw new BadRequestException("Uploaded file is not valid audio within the size limit");
+        }
+
         Sample sample = Sample.builder()
-                .title(request.title())
+                .title(request.title().trim())
                 .description(request.description())
                 .bpm(request.bpm())
                 .sampleType(request.sampleType())
@@ -83,17 +126,29 @@ public class SampleServiceImpl implements SampleService {
                 .genre(request.genre())
                 .fileKey(request.fileKey())
                 .originalFileName(request.originalFileName())
-                .mimeType(request.mimeType())
-                .fileSizeBytes(request.fileSizeBytes())
+                .mimeType(contentType)          // from R2, not from the client
+                .fileSizeBytes(size)            // from R2, not from the client
                 .durationSeconds(request.durationSeconds())
-                .uploader(uploader)
                 .waveformPeaks(request.waveformPeaks())
+                .uploader(uploader)
                 .build();
 
-        Sample saved = sampleRepository.save(sample);
-        return toDto(saved);
+        return toDto(sampleRepository.save(sample));
     }
 
+    private void enforceUploadQuota(User uploader) {
+        if (sampleRepository.countByUploader_UserId(uploader.getUserId()) >= maxSamplesPerUser) {
+            throw new ForbiddenOperationException("Upload limit reached (" + maxSamplesPerUser + " samples)");
+        }
+    }
+
+    private void deleteObjectQuietly(String key) {
+        try {
+            s3Client.deleteObject(DeleteObjectRequest.builder().bucket(bucket).key(key).build());
+        } catch (Exception e) {
+            log.warn("Could not remove R2 object {}: {}", key, e.getMessage());
+        }
+    }
     private SampleDto toDto(Sample sample) {
         SampleDto dto = modelMapper.map(sample, SampleDto.class);
         dto.setUploaderUsername(sample.getUploader().getUsername());
@@ -230,4 +285,9 @@ public class SampleServiceImpl implements SampleService {
     private String blankToNull(String s) {
         return (s == null || s.isBlank()) ? null : s.trim();
     }
+
+	
+
+
+	
 }

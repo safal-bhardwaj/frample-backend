@@ -37,13 +37,15 @@ public class SampleController {
     private final SampleService sampleService;
 
     @PostMapping("/presign-upload")
-    public ResponseEntity<PresignedUploadResponse> presignUpload(@RequestBody PresignedUploadRequest request) {
-        return ResponseEntity.ok(sampleService.createPresignedUpload(request));
+    public ResponseEntity<PresignedUploadResponse> presignUpload(
+            @RequestBody PresignedUploadRequest request,
+            @AuthenticationPrincipal User currentUser) {
+        return ResponseEntity.ok(sampleService.createPresignedUpload(request, currentUser));
     }
 
     @PostMapping
     public ResponseEntity<SampleDto> saveSample(
-            @RequestBody SaveSampleRequest request,
+            @Valid @RequestBody SaveSampleRequest request,
             @AuthenticationPrincipal User currentUser) {
         return ResponseEntity.status(HttpStatus.CREATED).body(sampleService.saveSample(request, currentUser));
     }
@@ -93,5 +95,10 @@ public class SampleController {
             @AuthenticationPrincipal User currentUser) {
         sampleService.deleteSample(id, currentUser);
         return ResponseEntity.noContent().build();
+    }
+    
+    @GetMapping("/health")
+    public ResponseEntity<String> health() {
+        return ResponseEntity.ok("ok");
     }
 }
